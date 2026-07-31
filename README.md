@@ -116,8 +116,14 @@ device emulation is the part that needs real-hardware iteration**:
   replay verbatim (reply sequence counters, the device clock in `0181`, status cadence). If it
   connects but won't project, those are the first things to tune — capture the exchange and diff
   against a real FB4 session.
-- Discovery: the emulator periodically broadcasts the FB4E announcement. Depending on how
-  QuickShow/BEYOND drives discovery, it may also need to reply to the host's query directly.
+- Discovery: QuickShow/BEYOND find an FB4 by sending ASDP queries to the multicast group
+  `224.76.78.75:20808` (continuously) and the device replying **unicast** with a `0080` announce
+  from its own `:9022`; the host locates the device by that reply's source IP. The emulator joins
+  that group, listens on `:9022`, and unicasts the announce back (plus an unsolicited broadcast
+  each second). **Run the emulator on a separate machine from QuickShow/BEYOND** — a real FB4 is a
+  distinct network device, and on the same host it shares the host's IP and `:9022`, so the host
+  can't treat it as a remote device. It may still need to send the `0180` parameter dump before the
+  host will fully connect (not yet replayed).
 - Timing: scan-out acks (`0d8a`) are emitted on a fixed cadence; the real device ties these to the
   scan clock.
 - This has been written but not yet validated against live QuickShow/BEYOND + Ether Dream

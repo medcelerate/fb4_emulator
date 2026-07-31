@@ -10,18 +10,22 @@
 //! fields (reply sequence counters, clock) against live software — see the crate README.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ether_dream::protocol::DacPoint;
+use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::convert::to_dac_points;
 use crate::etherdream::SharedPoints;
 
 const CONTROL_PORT: u16 = 3348;
 const ANNOUNCE_PORT: u16 = 9022;
+/// ASDP discovery multicast group + port that QuickShow/BEYOND query to find FB4s.
+const ASDP_GROUP: Ipv4Addr = Ipv4Addr::new(224, 76, 78, 75);
+const ASDP_PORT: u16 = 20808;
 
 /// One emulated FB4.
 pub struct Fb4Emu {
@@ -68,7 +72,7 @@ pub fn run(emu: Arc<Fb4Emu>) {
     {
         let emu = emu.clone();
         let templates = templates.clone();
-        std::thread::spawn(move || announce_loop(&emu, &templates));
+        std::thread::spawn(move || discovery_responder(&emu, &templates));
     }
 
     // UDP turbo (0xe04 / 0dbe) frame listener.
@@ -112,8 +116,45 @@ pub fn run(emu: Arc<Fb4Emu>) {
     }
 }
 
-/// Broadcast the FB4E discovery announcement (patched with our serial) so QuickShow/BEYOND find us.
-fn announce_loop(emu: &Fb4Emu, templates: &HashMap<String, Vec<u8>>) {
+/// Bind a reusable UDP socket (SO_REUSEADDR, +SO_REUSEPORT on unix) with a short read timeout.
+fn reuse_udp(bind: SocketAddrV4, broadcast: bool) -> io::Result<UdpSocket> {
+    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    s.set_reuse_address(true)?;
+    #[cfg(unix)]
+    s.set_reuse_port(true)?;
+    if broadcast {
+        s.set_broadcast(true)?;
+    }
+    s.bind(&SocketAddr::V4(bind).into())?;
+    let u: UdpSocket = s.into();
+    u.set_read_timeout(Some(Duration::from_millis(300)))?;
+    Ok(u)
+}
+
+/// Bind a UDP socket joined to the ASDP multicast group so we receive QuickShow/BEYOND's queries.
+fn asdp_multicast_socket(iface: Ipv4Addr) -> io::Result<UdpSocket> {
+    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    s.set_reuse_address(true)?;
+    #[cfg(unix)]
+    s.set_reuse_port(true)?;
+    s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, ASDP_PORT)).into())?;
+    s.join_multicast_v4(&ASDP_GROUP, &iface)?;
+    let u: UdpSocket = s.into();
+    u.set_read_timeout(Some(Duration::from_millis(300)))?;
+    Ok(u)
+}
+
+/// Make QuickShow/BEYOND discover us.
+///
+/// A real FB4 is found by *replying* to the host's discovery, unicast, from its own `:9022` — the
+/// host then locates the device by that reply's source address. So we: listen on `:9022` and on
+/// the ASDP multicast group (`224.76.78.75:20808`), and whenever a host probes, unicast the `0080`
+/// announce back to it from our `:9022`. We also emit an unsolicited broadcast every second.
+///
+/// IMPORTANT: run this on a DIFFERENT host than QuickShow/BEYOND. A real FB4 is a separate network
+/// device; on the same machine it shares the host's IP and `:9022`, so the host can't treat it as a
+/// remote device. Give the emulator its own machine (or VM) with its own IP on the laser subnet.
+fn discovery_responder(emu: &Fb4Emu, templates: &HashMap<String, Vec<u8>>) {
     let mut ann = match templates.get("announce") {
         Some(a) => a.clone(),
         None => return,
@@ -121,21 +162,57 @@ fn announce_loop(emu: &Fb4Emu, templates: &HashMap<String, Vec<u8>>) {
     if ann.len() > 0x28 {
         put_u32(&mut ann, 0x24, emu.serial); // serial @ 0x24 in the announcement
     }
-    let sock = match UdpSocket::bind(SocketAddrV4::new(emu.local_ip, 0)) {
+
+    // Socket on our IP:9022 — receives host probes on 9022 and sends replies *from* :9022.
+    let disc = match reuse_udp(SocketAddrV4::new(emu.local_ip, ANNOUNCE_PORT), true) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[fb4 {}] cannot bind :{ANNOUNCE_PORT} for discovery: {e}", emu.local_ip);
+            return;
+        }
     };
-    let _ = sock.set_broadcast(true);
+    // Join the ASDP multicast group (best effort) to hear the host's discovery queries.
+    let mcast = asdp_multicast_socket(emu.local_ip).ok();
+    if mcast.is_none() {
+        eprintln!("[fb4 {}] warning: could not join ASDP multicast {ASDP_GROUP}:{ASDP_PORT}", emu.local_ip);
+    }
+
     let o = emu.local_ip.octets();
-    let targets = [
+    let bcast_targets = [
         SocketAddrV4::new(Ipv4Addr::BROADCAST, ANNOUNCE_PORT),
         SocketAddrV4::new(Ipv4Addr::new(o[0], o[1], 255, 255), ANNOUNCE_PORT),
     ];
+    let mut last_bcast = Instant::now() - Duration::from_secs(5);
+    let mut buf = [0u8; 2048];
+
     loop {
-        for t in &targets {
-            let _ = sock.send_to(&ann, t);
+        // Unsolicited announce broadcast every second.
+        if last_bcast.elapsed() >= Duration::from_secs(1) {
+            for t in &bcast_targets {
+                let _ = disc.send_to(&ann, t);
+            }
+            last_bcast = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(800));
+
+        // Reply unicast to any host that probes us (on 9022 or via the ASDP multicast query).
+        let mut host: Option<Ipv4Addr> = None;
+        if let Ok((_, SocketAddr::V4(src))) = disc.recv_from(&mut buf) {
+            if *src.ip() != emu.local_ip {
+                host = Some(*src.ip());
+            }
+        }
+        if host.is_none() {
+            if let Some(m) = &mcast {
+                if let Ok((_, SocketAddr::V4(src))) = m.recv_from(&mut buf) {
+                    if *src.ip() != emu.local_ip {
+                        host = Some(*src.ip());
+                    }
+                }
+            }
+        }
+        if let Some(h) = host {
+            let _ = disc.send_to(&ann, SocketAddrV4::new(h, ANNOUNCE_PORT));
+        }
     }
 }
 

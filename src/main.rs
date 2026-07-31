@@ -15,17 +15,21 @@ mod etherdream;
 mod fb4_device;
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ether_dream::dac::MacAddress;
-use ether_dream::protocol::DacBroadcast;
+use ether_dream::protocol::{DacBroadcast, ReadFromBytes};
+use socket2::{Domain, Protocol, Socket, Type};
 
 use etherdream::SharedPoints;
 use fb4_device::Fb4Emu;
 
-const DISCOVERY_SECS: u64 = 4;
+const DISCOVERY_SECS: u64 = 6;
+/// Ether Dream DACs broadcast a 36-byte status datagram to this UDP port ~once per second.
+const ETHERDREAM_BROADCAST_PORT: u16 = 7654;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,7 +51,11 @@ fn main() {
     println!("Discovering Ether Dream DACs for {DISCOVERY_SECS}s...");
     let dacs = discover_dacs(Duration::from_secs(DISCOVERY_SECS));
     if dacs.is_empty() {
-        eprintln!("No Ether Dream DACs found. (Are they powered and on this subnet?)");
+        eprintln!("No Ether Dream DACs found. The DAC broadcasts to UDP :{ETHERDREAM_BROADCAST_PORT} once/sec — if");
+        eprintln!("Wireshark sees those packets but we don't, it's almost always one of:");
+        eprintln!("  - Windows Firewall blocking this program's inbound UDP (allow it, or add a rule");
+        eprintln!("    for UDP {ETHERDREAM_BROADCAST_PORT}). Capture tools see traffic the firewall drops before us.");
+        eprintln!("  - This host has no address on the DAC's subnet (the DAC uses 169.254.x link-local).");
         std::process::exit(1);
     }
 
@@ -126,34 +134,57 @@ fn setup_aliases(ips: &[Ipv4Addr], iface: Option<&str>, run: bool) {
     }
 }
 
+/// Open a UDP listener for Ether Dream broadcasts.
+///
+/// Bound to 0.0.0.0:7654 with SO_REUSEADDR (and SO_REUSEPORT on unix) so it receives limited
+/// broadcasts (255.255.255.255) AND coexists with any other software already listening on the
+/// port — a plain bind fails with "address in use" in that case, which is a common reason the DAC
+/// is "not seen".
+fn open_broadcast_socket() -> io::Result<UdpSocket> {
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
+    sock.set_broadcast(true)?;
+    let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, ETHERDREAM_BROADCAST_PORT));
+    sock.bind(&addr.into())?;
+    Ok(sock.into())
+}
+
 /// Collect unique Ether Dream DACs advertised on the network within `window`.
 fn discover_dacs(window: Duration) -> Vec<(DacBroadcast, IpAddr)> {
-    let (tx, rx) = std::sync::mpsc::channel::<(DacBroadcast, IpAddr)>();
-    std::thread::spawn(move || {
-        if let Ok(iter) = ether_dream::recv_dac_broadcasts() {
-            for res in iter {
-                if let Ok((bc, addr)) = res {
-                    if tx.send((bc, addr.ip())).is_err() {
-                        return;
-                    }
-                }
-            }
+    let sock = match open_broadcast_socket() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Discovery: could not open UDP :{ETHERDREAM_BROADCAST_PORT} listener: {e}");
+            eprintln!("  (If this is 'address in use', another program holds the port — we set");
+            eprintln!("   SO_REUSEADDR, so this usually means a firewall/permission issue instead.)");
+            return Vec::new();
         }
-    });
+    };
+    sock.set_read_timeout(Some(Duration::from_millis(500))).ok();
 
     let mut seen: HashSet<[u8; 6]> = HashSet::new();
     let mut dacs = Vec::new();
     let deadline = Instant::now() + window;
+    let mut buf = [0u8; 1024];
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(remaining.min(Duration::from_millis(500))) {
-            Ok((bc, ip)) => {
-                if seen.insert(bc.mac_address) {
-                    println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
-                    dacs.push((bc, ip));
+        match sock.recv_from(&mut buf) {
+            Ok((n, src)) if n >= 36 => {
+                if let Ok(bc) = DacBroadcast::read_from_bytes(&buf[..n]) {
+                    if seen.insert(bc.mac_address) {
+                        let ip = src.ip();
+                        println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
+                        dacs.push((bc, ip));
+                    }
                 }
             }
-            Err(_) => {}
+            Ok(_) => {} // too short to be a broadcast
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+            Err(e) => {
+                eprintln!("Discovery: recv error: {e}");
+                break;
+            }
         }
     }
     dacs

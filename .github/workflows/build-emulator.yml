@@ -19,9 +19,12 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
-      # Set this secret only if the fb4 library repo is PRIVATE (a PAT with read access).
-      # Public repos need nothing here.
-      FB4_REPO_TOKEN: ${{ secrets.FB4_REPO_TOKEN }}
+      # Fetch git dependencies with the git CLI. Cargo's built-in (libgit2) SSH support is
+      # unreliable in CI — particularly on Windows — so the CLI path is the robust choice.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Private half of a read-only SSH deploy key added to the fb4 library repo's Deploy Keys.
+      # Stored as the `KEY_S` Actions secret. (Public repos: leave the secret unset.)
+      FB4_DEPLOY_KEY: ${{ secrets.KEY_S }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,14 +32,24 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      # --- Private fb4 dependency: authenticate via SSH deploy key (skipped if no secret) ---
+      - name: Set up SSH deploy key
+        if: ${{ env.FB4_DEPLOY_KEY != '' }}
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.KEY_S }}
 
-      - name: Configure git auth for private fb4 dependency
-        if: ${{ env.FB4_REPO_TOKEN != '' }}
+      - name: Use SSH for github.com git dependencies
+        if: ${{ env.FB4_DEPLOY_KEY != '' }}
         shell: bash
         run: |
-          git config --global url."https://x-access-token:${FB4_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          # Cargo.toml keeps the https URL; rewrite the transport to SSH so the deploy key is used.
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
         run: cargo build --release

@@ -45,8 +45,18 @@ sibling copy of the library, uncomment the `[patch]` block in `Cargo.toml`.)
 
 `.github/workflows/build-emulator.yml` builds the Windows emulator on every push/PR: it checks out
 this repo, pulls `fb4` from git, builds release, and uploads `fb4_bridge-windows-x64.zip` as an
-artifact. Pushing a `v*` tag also attaches the zip to a GitHub Release. If the library repo is
-private, add a `FB4_REPO_TOKEN` secret (a PAT with read access); public repos need nothing.
+artifact. Pushing a `v*` tag also attaches the zip to a GitHub Release.
+
+If the library repo is **private**, authenticate with an SSH deploy key (more reliable in CI than
+HTTP credential helpers, especially on Windows):
+
+1. Generate a keypair: `ssh-keygen -t ed25519 -f fb4_deploy -N ""`.
+2. In `medcelerate/FB4` → Settings → Deploy keys, add `fb4_deploy.pub` (read-only).
+3. In this repo → Settings → Secrets → Actions, add `KEY_S` = the private key (`fb4_deploy`).
+
+CI then loads the key into an ssh-agent and rewrites the git transport to SSH
+(`CARGO_NET_GIT_FETCH_WITH_CLI` makes cargo use the git CLI). If the repo is public, omit the
+secret entirely — the SSH steps are skipped and the build fetches over HTTPS.
 
 ## Run
 

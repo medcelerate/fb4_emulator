@@ -85,6 +85,26 @@ the alias step is skipped — configure the IPs yourself.)
 Then in QuickShow/BEYOND, run discovery — the emulated FB4E(s) should appear; project to them and
 the output goes to the mapped Ether Dream DAC(s).
 
+## Troubleshooting: "No Ether Dream DACs found"
+
+Ether Dream DACs announce via UDP broadcast to `:7654` once per second, and the bridge listens on
+both `0.0.0.0` and the link-local NIC's own IP (needed because a Windows `0.0.0.0` socket only
+receives limited broadcasts on the default-route interface).
+
+If the startup line shows `Discovery: 0 datagram(s)` but Wireshark *does* see `:7654` broadcasts on
+that NIC, **Windows Firewall is dropping them.** A link-local laser NIC (APIPA `169.254.x`, no
+gateway) is an "unidentified network", which Windows puts on the stricter **Public** profile — so
+turning the firewall off for your normal network doesn't affect it. Add a permanent inbound rule
+(all profiles) in an Administrator prompt:
+
+```
+netsh advfirewall firewall add rule name="etherdream-in" dir=in action=allow protocol=UDP localport=7654 profile=any
+```
+
+The bridge prints the interfaces it found and a raw datagram count each run, so `0 datagram(s)`
+points at the firewall/subnet, while a non-zero count that still finds no DAC points at the DAC
+itself.
+
 ## Status & caveats (please read)
 
 The Ether Dream side, the frame decode, and the conversion are built on well-verified ground (the

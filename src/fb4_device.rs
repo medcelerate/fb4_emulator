@@ -77,13 +77,22 @@ pub fn run(emu: Arc<Fb4Emu>) {
         std::thread::spawn(move || udp_turbo_loop(&emu));
     }
 
-    // TCP control server.
+    // TCP control server. A freshly-added IP alias isn't immediately bindable — Windows runs
+    // Duplicate Address Detection for a moment (error 10049) — so retry for a short while.
     let bind = SocketAddrV4::new(emu.local_ip, CONTROL_PORT);
-    let listener = match TcpListener::bind(bind) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[fb4 {} serial={}] cannot bind {}: {e}", emu.local_ip, emu.serial, bind);
-            return;
+    let bind_deadline = Instant::now() + Duration::from_secs(20);
+    let listener = loop {
+        match TcpListener::bind(bind) {
+            Ok(l) => break l,
+            Err(e) if Instant::now() < bind_deadline => {
+                eprintln!("[fb4 {} serial={}] waiting for {} to become bindable ({e})", emu.local_ip, emu.serial, bind);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => {
+                eprintln!("[fb4 {} serial={}] cannot bind {}: {e}", emu.local_ip, emu.serial, bind);
+                eprintln!("  Is {} assigned to a NIC? Use an existing NIC IP, or add the alias as Administrator.", emu.local_ip);
+                return;
+            }
         }
     };
     println!("[fb4 {} serial={}] emulating FB4E, listening on :{CONTROL_PORT}", emu.local_ip, emu.serial);

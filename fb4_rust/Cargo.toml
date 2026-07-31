@@ -1,0 +1,22 @@
+[package]
+name = "fb4"
+version = "0.1.0"
+edition = "2021"
+description = "Driver for Pangolin FB4/FB4E laser controllers: async discovery, connection, and point streaming, with a C ABI for C/C++."
+license = "MIT OR Apache-2.0"
+
+# lib      -> use from Rust
+# cdylib   -> shared library (.so/.dll/.dylib) for C/C++
+# staticlib-> static library (.a/.lib) for C/C++
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+des = "0.8"
+cipher = "0.4"
+generic-array = "0.14"
+rand = "0.8"
+socket2 = "0.5"
+# (Release profile intentionally omitted — this crate is vendored as a path dependency of
+# fb4_bridge, whose own [profile.release] governs the build.)

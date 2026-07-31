@@ -33,31 +33,18 @@ Each emulated FB4 gets a unique serial (`600000 + n`).
 cargo build --release
 ```
 
-The `fb4` library is a git dependency on [`medcelerate/FB4`](https://github.com/medcelerate/FB4),
-so a plain build fetches it automatically — no local checkout needed. (For local work against a
-sibling copy of the library, uncomment the `[patch]` block in `Cargo.toml`.)
-
-> The library repo must include the `codec` module the emulator uses
-> (`fb4::codec::{transform_nonce, session_keybase, tcp_frame_key, des_cbc_decrypt,
-> parse_point_stream, turbo_key}`). Push those before building.
+The `fb4` protocol library is **vendored** into this repo under `fb4_rust/` and used as a path
+dependency, so the build is fully self-contained — no git auth, no external checkout. Only
+crates.io dependencies are fetched.
 
 ### CI
 
-`.github/workflows/build-emulator.yml` builds the Windows emulator on every push/PR: it checks out
-this repo, pulls `fb4` from git, builds release, and uploads `fb4_bridge-windows-x64.zip` as an
-artifact. Pushing a `v*` tag also attaches the zip to a GitHub Release.
+`.github/workflows/build-emulator.yml` builds the Windows emulator on every push/PR: checkout →
+`cargo build --release` → zip `fb4_bridge.exe` + README into `fb4_bridge-windows-x64.zip`, uploaded
+as an artifact. Pushing a `v*` tag also attaches the zip to a GitHub Release. No secrets required.
 
-If the library repo is **private**, authenticate with an SSH deploy key (more reliable in CI than
-HTTP credential helpers, especially on Windows):
-
-1. Generate a keypair: `ssh-keygen -t ed25519 -f fb4_deploy -N ""`.
-2. In `medcelerate/FB4` → Settings → Deploy keys, add `fb4_deploy.pub` (read-only).
-3. In this repo → Settings → Secrets → Actions, add `KEY_S` = the private key (`fb4_deploy`).
-
-The key **must have no passphrase** (`-N ""` above). CI writes it to a file, points git's ssh at
-it, and rewrites the git transport to SSH (`CARGO_NET_GIT_FETCH_WITH_CLI` makes cargo use the git
-CLI). It deliberately avoids ssh-agent, which is unreliable on Windows runners. If the repo is
-public, omit the secret entirely — the SSH steps are skipped and the build fetches over HTTPS.
+> Keeping the vendored `fb4_rust/` in sync with the upstream library
+> (`github.com/medcelerate/FB4`) is a manual copy when the codec changes.
 
 ## Run
 
@@ -123,3 +110,4 @@ device emulation is the part that needs real-hardware iteration**:
 - `src/etherdream.rs` — drive one DAC from the shared point buffer.
 - `src/convert.rs` — FB4 point → Ether Dream point.
 - `assets/fb4_device_templates.json` — captured FB4 device replies (announce, `0181`, acks, status).
+- `fb4_rust/` — vendored FB4 protocol library (path dependency).

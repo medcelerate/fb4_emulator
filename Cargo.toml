@@ -9,15 +9,11 @@ name = "fb4_bridge"
 path = "src/main.rs"
 
 [dependencies]
-# Reuse the FB4 protocol codec (key derivation, DES-CBC decrypt, point-stream parse).
-# Pulled from the fb4_rs library repo so CI and fresh clones build without a local checkout.
-fb4 = { git = "https://github.com/medcelerate/FB4" }
+# FB4 protocol codec (key derivation, DES-CBC decrypt, point-stream parse). Vendored into this
+# repo under fb4_rust/ so the build is fully self-contained — no git auth, no external checkout.
+fb4 = { path = "fb4_rust" }
 # Ether Dream DAC discovery + streaming.
 ether-dream = "0.2"
-
-# For local development against a sibling checkout of the library, uncomment:
-# [patch."https://github.com/medcelerate/FB4"]
-# fb4 = { path = "../fb4_rust" }
 
 [profile.release]
 opt-level = 3

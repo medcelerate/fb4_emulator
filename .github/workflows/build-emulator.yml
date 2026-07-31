@@ -1,7 +1,8 @@
 name: build-emulator
 
-# Builds the Windows FB4 emulator (fb4_bridge). The `fb4` library is pulled from
-# github.com/medcelerate/FB4 as a git dependency, so this is a single checkout + build.
+# Builds the Windows FB4 emulator (fb4_bridge). The fb4 library is vendored under fb4_rust/, so
+# this is fully self-contained: a single checkout + cargo build, no auth or external dependencies
+# beyond crates.io.
 #
 # Assumes this repo's root is the fb4_bridge crate (Cargo.toml at the root). If the crate lives in
 # a subdirectory, add `working-directory:` to the cargo/package steps.
@@ -19,36 +20,12 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
-      # Fetch git dependencies with the git CLI. Cargo's built-in (libgit2) SSH support is
-      # unreliable in CI — particularly on Windows — so the CLI path is the robust choice.
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      # Private half of a read-only SSH deploy key added to the fb4 library repo's Deploy Keys.
-      # Stored as the `KEY_S` Actions secret. (Public repos: leave the secret unset.)
-      FB4_DEPLOY_KEY: ${{ secrets.KEY_S }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-
-      # --- Private fb4 dependency: authenticate via SSH deploy key (skipped if no secret) ---
-      # No ssh-agent: on Windows the bundled ssh-add is unreliable (it prompts for a passphrase
-      # when it can't parse the key). Instead write the key to a file and point git's ssh at it.
-      # NOTE: the deploy key MUST have no passphrase (`ssh-keygen -t ed25519 -N ""`).
-      - name: Set up SSH deploy key
-        if: ${{ env.FB4_DEPLOY_KEY != '' }}
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          # Normalize to LF endings + trailing newline — Windows ssh chokes on CRLF keys.
-          printf '%s\n' "$FB4_DEPLOY_KEY" | tr -d '\r' > ~/.ssh/fb4_deploy
-          chmod 600 ~/.ssh/fb4_deploy
-          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          # Cargo.toml keeps the https URL; rewrite the transport to SSH so the deploy key is used.
-          git config --global url."git@github.com:".insteadOf "https://github.com/"
-          # Make git (and thus cargo, via CARGO_NET_GIT_FETCH_WITH_CLI) use exactly this key.
-          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/fb4_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

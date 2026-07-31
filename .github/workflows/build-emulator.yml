@@ -1,0 +1,62 @@
+name: build-emulator
+
+# Builds the Windows FB4 emulator (fb4_bridge). The `fb4` library is pulled from
+# github.com/medcelerate/FB4 as a git dependency, so this is a single checkout + build.
+#
+# Assumes this repo's root is the fb4_bridge crate (Cargo.toml at the root). If the crate lives in
+# a subdirectory, add `working-directory:` to the cargo/package steps.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Build fb4_bridge (Windows x64)
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      # Set this secret only if the fb4 library repo is PRIVATE (a PAT with read access).
+      # Public repos need nothing here.
+      FB4_REPO_TOKEN: ${{ secrets.FB4_REPO_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Configure git auth for private fb4 dependency
+        if: ${{ env.FB4_REPO_TOKEN != '' }}
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${FB4_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/fb4_bridge.exe dist/
+          Copy-Item README.md dist/README.md
+          Compress-Archive -Path dist/* -DestinationPath fb4_bridge-windows-x64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb4_bridge-windows-x64
+          path: fb4_bridge-windows-x64.zip
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fb4_bridge-windows-x64.zip

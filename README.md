@@ -54,9 +54,10 @@ HTTP credential helpers, especially on Windows):
 2. In `medcelerate/FB4` → Settings → Deploy keys, add `fb4_deploy.pub` (read-only).
 3. In this repo → Settings → Secrets → Actions, add `KEY_S` = the private key (`fb4_deploy`).
 
-CI then loads the key into an ssh-agent and rewrites the git transport to SSH
-(`CARGO_NET_GIT_FETCH_WITH_CLI` makes cargo use the git CLI). If the repo is public, omit the
-secret entirely — the SSH steps are skipped and the build fetches over HTTPS.
+The key **must have no passphrase** (`-N ""` above). CI writes it to a file, points git's ssh at
+it, and rewrites the git transport to SSH (`CARGO_NET_GIT_FETCH_WITH_CLI` makes cargo use the git
+CLI). It deliberately avoids ssh-agent, which is unreliable on Windows runners. If the repo is
+public, omit the secret entirely — the SSH steps are skipped and the build fetches over HTTPS.
 
 ## Run
 

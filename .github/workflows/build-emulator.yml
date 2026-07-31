@@ -33,20 +33,22 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # --- Private fb4 dependency: authenticate via SSH deploy key (skipped if no secret) ---
+      # No ssh-agent: on Windows the bundled ssh-add is unreliable (it prompts for a passphrase
+      # when it can't parse the key). Instead write the key to a file and point git's ssh at it.
+      # NOTE: the deploy key MUST have no passphrase (`ssh-keygen -t ed25519 -N ""`).
       - name: Set up SSH deploy key
-        if: ${{ env.FB4_DEPLOY_KEY != '' }}
-        uses: webfactory/ssh-agent@v0.9.1
-        with:
-          ssh-private-key: ${{ secrets.KEY_S }}
-
-      - name: Use SSH for github.com git dependencies
         if: ${{ env.FB4_DEPLOY_KEY != '' }}
         shell: bash
         run: |
           mkdir -p ~/.ssh
+          # Normalize to LF endings + trailing newline — Windows ssh chokes on CRLF keys.
+          printf '%s\n' "$FB4_DEPLOY_KEY" | tr -d '\r' > ~/.ssh/fb4_deploy
+          chmod 600 ~/.ssh/fb4_deploy
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           # Cargo.toml keeps the https URL; rewrite the transport to SSH so the deploy key is used.
           git config --global url."git@github.com:".insteadOf "https://github.com/"
+          # Make git (and thus cargo, via CARGO_NET_GIT_FETCH_WITH_CLI) use exactly this key.
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/fb4_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

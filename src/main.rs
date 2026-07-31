@@ -156,35 +156,61 @@ fn print_interfaces() {
     }
 }
 
-/// Open a UDP listener for Ether Dream broadcasts.
+/// Find the local interface IP the OS would use to reach `target`, via the routing table. This
+/// works even when interface enumeration misses APIPA/link-local NICs. No packet is actually sent.
+fn route_src_ip(target: Ipv4Addr) -> Option<Ipv4Addr> {
+    let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((target, 9)).ok()?; // UDP connect just selects a source via routing
+    match s.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    }
+}
+
+/// Open a UDP broadcast listener bound to `bind_ip`:7654.
 ///
-/// Bound to 0.0.0.0:7654 with SO_REUSEADDR (and SO_REUSEPORT on unix) so it receives limited
-/// broadcasts (255.255.255.255) AND coexists with any other software already listening on the
-/// port — a plain bind fails with "address in use" in that case, which is a common reason the DAC
-/// is "not seen".
-fn open_broadcast_socket() -> io::Result<UdpSocket> {
+/// SO_REUSEADDR (and SO_REUSEPORT on unix) so we coexist with other listeners. On multi-homed
+/// Windows, a socket bound to 0.0.0.0 receives limited broadcasts (255.255.255.255) only on the
+/// primary/default-route interface — to catch a DAC on a secondary NIC (the link-local laser NIC)
+/// we must bind a socket to that interface's own IP too. So discovery opens several.
+fn open_broadcast_socket(bind_ip: Ipv4Addr) -> io::Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.set_broadcast(true)?;
-    let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, ETHERDREAM_BROADCAST_PORT));
-    sock.bind(&addr.into())?;
-    Ok(sock.into())
+    sock.bind(&SocketAddr::from((bind_ip, ETHERDREAM_BROADCAST_PORT)).into())?;
+    let udp: UdpSocket = sock.into();
+    udp.set_read_timeout(Some(Duration::from_millis(300)))?;
+    Ok(udp)
 }
 
 /// Collect unique Ether Dream DACs advertised on the network within `window`.
 fn discover_dacs(window: Duration) -> Vec<(DacBroadcast, IpAddr)> {
-    let sock = match open_broadcast_socket() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Discovery: could not open UDP :{ETHERDREAM_BROADCAST_PORT} listener: {e}");
-            eprintln!("  (If this is 'address in use', another program holds the port — we set");
-            eprintln!("   SO_REUSEADDR, so this usually means a firewall/permission issue instead.)");
-            return Vec::new();
+    // Bind on 0.0.0.0 (a DAC on the primary interface) AND on the link-local NIC's own IP (a DAC
+    // on a secondary interface — the usual laser setup on Windows).
+    let mut bind_ips = vec![Ipv4Addr::UNSPECIFIED];
+    if let Some(ll) = route_src_ip(Ipv4Addr::new(169, 254, 1, 1)) {
+        println!("Laser NIC (link-local route): {ll}");
+        if !bind_ips.contains(&ll) {
+            bind_ips.push(ll);
         }
-    };
-    sock.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    }
+
+    let mut socks = Vec::new();
+    for ip in &bind_ips {
+        match open_broadcast_socket(*ip) {
+            Ok(s) => {
+                println!("  listening on {ip}:{ETHERDREAM_BROADCAST_PORT}");
+                socks.push(s);
+            }
+            Err(e) => eprintln!("  cannot bind {ip}:{ETHERDREAM_BROADCAST_PORT}: {e}"),
+        }
+    }
+    if socks.is_empty() {
+        eprintln!("Discovery: no broadcast listener could be opened.");
+        return Vec::new();
+    }
 
     let mut seen: HashSet<[u8; 6]> = HashSet::new();
     let mut dacs = Vec::new();
@@ -193,28 +219,26 @@ fn discover_dacs(window: Duration) -> Vec<(DacBroadcast, IpAddr)> {
     let deadline = Instant::now() + window;
     let mut buf = [0u8; 1024];
     while Instant::now() < deadline {
-        match sock.recv_from(&mut buf) {
-            Ok((n, src)) => {
-                raw_count += 1;
-                raw_srcs.insert(src.ip());
-                if n >= 36 {
-                    if let Ok(bc) = DacBroadcast::read_from_bytes(&buf[..n]) {
-                        if seen.insert(bc.mac_address) {
-                            let ip = src.ip();
-                            println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
-                            dacs.push((bc, ip));
+        for sock in &socks {
+            match sock.recv_from(&mut buf) {
+                Ok((n, src)) => {
+                    raw_count += 1;
+                    raw_srcs.insert(src.ip());
+                    if n >= 36 {
+                        if let Ok(bc) = DacBroadcast::read_from_bytes(&buf[..n]) {
+                            if seen.insert(bc.mac_address) {
+                                let ip = src.ip();
+                                println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
+                                dacs.push((bc, ip));
+                            }
                         }
                     }
                 }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
-            Err(e) => {
-                eprintln!("Discovery: recv error: {e}");
-                break;
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => eprintln!("Discovery: recv error: {e}"),
             }
         }
     }
-    // Diagnostic: how much actually reached the socket.
     println!(
         "Discovery: {raw_count} datagram(s) on :{ETHERDREAM_BROADCAST_PORT} from {:?}",
         raw_srcs.iter().collect::<Vec<_>>()

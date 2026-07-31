@@ -48,6 +48,7 @@ fn main() {
         std::process::exit(1);
     }
 
+    print_interfaces();
     println!("Discovering Ether Dream DACs for {DISCOVERY_SECS}s...");
     let dacs = discover_dacs(Duration::from_secs(DISCOVERY_SECS));
     if dacs.is_empty() {
@@ -134,6 +135,27 @@ fn setup_aliases(ips: &[Ipv4Addr], iface: Option<&str>, run: bool) {
     }
 }
 
+/// Print the host's IPv4 interfaces so the user can confirm one is on the DAC's subnet.
+fn print_interfaces() {
+    match if_addrs::get_if_addrs() {
+        Ok(addrs) => {
+            println!("Local IPv4 interfaces:");
+            let mut any = false;
+            for ifa in addrs {
+                if let IpAddr::V4(v4) = ifa.ip() {
+                    let ll = if v4.octets()[0] == 169 && v4.octets()[1] == 254 { "  <- link-local" } else { "" };
+                    println!("  {:<28} {}{}", ifa.name, v4, ll);
+                    any = true;
+                }
+            }
+            if !any {
+                println!("  (none found)");
+            }
+        }
+        Err(e) => eprintln!("Could not list interfaces: {e}"),
+    }
+}
+
 /// Open a UDP listener for Ether Dream broadcasts.
 ///
 /// Bound to 0.0.0.0:7654 with SO_REUSEADDR (and SO_REUSEPORT on unix) so it receives limited
@@ -166,20 +188,25 @@ fn discover_dacs(window: Duration) -> Vec<(DacBroadcast, IpAddr)> {
 
     let mut seen: HashSet<[u8; 6]> = HashSet::new();
     let mut dacs = Vec::new();
+    let mut raw_count: u64 = 0;
+    let mut raw_srcs: HashSet<IpAddr> = HashSet::new();
     let deadline = Instant::now() + window;
     let mut buf = [0u8; 1024];
     while Instant::now() < deadline {
         match sock.recv_from(&mut buf) {
-            Ok((n, src)) if n >= 36 => {
-                if let Ok(bc) = DacBroadcast::read_from_bytes(&buf[..n]) {
-                    if seen.insert(bc.mac_address) {
-                        let ip = src.ip();
-                        println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
-                        dacs.push((bc, ip));
+            Ok((n, src)) => {
+                raw_count += 1;
+                raw_srcs.insert(src.ip());
+                if n >= 36 {
+                    if let Ok(bc) = DacBroadcast::read_from_bytes(&buf[..n]) {
+                        if seen.insert(bc.mac_address) {
+                            let ip = src.ip();
+                            println!("  found Ether Dream {} at {}", MacAddress(bc.mac_address), ip);
+                            dacs.push((bc, ip));
+                        }
                     }
                 }
             }
-            Ok(_) => {} // too short to be a broadcast
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
             Err(e) => {
                 eprintln!("Discovery: recv error: {e}");
@@ -187,5 +214,10 @@ fn discover_dacs(window: Duration) -> Vec<(DacBroadcast, IpAddr)> {
             }
         }
     }
+    // Diagnostic: how much actually reached the socket.
+    println!(
+        "Discovery: {raw_count} datagram(s) on :{ETHERDREAM_BROADCAST_PORT} from {:?}",
+        raw_srcs.iter().collect::<Vec<_>>()
+    );
     dacs
 }

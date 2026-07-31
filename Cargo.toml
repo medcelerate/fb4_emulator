@@ -16,6 +16,8 @@ fb4 = { path = "fb4_rust" }
 ether-dream = "0.2"
 # Custom broadcast-discovery socket (SO_REUSEADDR so we coexist with other listeners).
 socket2 = "0.5"
+# List local network interfaces for startup diagnostics.
+if-addrs = "0.10"
 
 [profile.release]
 opt-level = 3
